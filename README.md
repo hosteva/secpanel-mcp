@@ -1,6 +1,6 @@
 # Hosteva SecPanel MCP Server (@hosteva/secpanel-mcp)
 
-Official Model Context Protocol (MCP) server for **Hosteva SecPanel**. Seamlessly connects Cursor, Claude, Antigravity, and VS Code with Hosteva's real-time 300,000+ vulnerability intelligence database, EPSS exploit predictions, and Turkish AI remediation engine.
+Official Model Context Protocol (MCP) server for **Hosteva SecPanel**. Seamlessly connects Cursor, Claude, Antigravity, and VS Code with Hosteva's real-time 300,000+ vulnerability intelligence database, EPSS exploit predictions, Turkish AI remediation engine, and live quota tracking.
 
 ---
 
@@ -70,10 +70,29 @@ To use Hosteva SecPanel MCP in your IDE, an API key is required:
 
 ## 🛠️ Available MCP Tools
 
-1. **`scan_dependencies`**: Scans `package.json`, `composer.json`, or `requirements.txt` in your project workspace. Automatically cross-references CVEs, scores risks, and tracks remediation progress.
-2. **`check_package`**: Instantly checks a single library and version before installing (e.g., `axios@1.8.1`).
-3. **`get_cve_remediation`**: Retrieves verified Turkish AI remediation guides, patch details, and workarounds for a specific CVE ID.
-4. **`get_quota_status`**: Checks your daily package quota and live API rate limits.
+### 1. `scan_dependencies`
+Deep vulnerability scanning with exact lockfile resolution and external package support:
+- **Lockfile Priority:** Automatically detects and resolves exact pinned versions from `package-lock.json`, `composer.lock`, `yarn.lock`, `pnpm-lock.yaml`, `Pipfile.lock`, and `poetry.lock`.
+- **External Package Input (`packages`):** AI models can directly pass a package list in memory or from external sources (`docker inspect`, `pip freeze`, custom container):
+  ```json
+  {
+    "packages": [
+      { "name": "axios", "version": "1.19.0", "ecosystem": "npm" },
+      { "name": "guzzlehttp/guzzle", "version": "7.5.0", "ecosystem": "composer" }
+    ]
+  }
+  ```
+- **Raw Lockfile Content (`raw_content`):** Pass raw lockfile or requirements text obtained from SSH, remote VMs, or clipboards.
+- **Quota Transparency:** Returns real-time quota status (`daily_package_quota`, `packages_scanned_today`, `remaining_quota`) with every scan.
+
+### 2. `check_package`
+Instantly checks a single library and version before installing (e.g. `axios@1.19.0`). Returns live remaining quota.
+
+### 3. `get_cve_remediation`
+Retrieves verified Turkish AI remediation guides, patch details, and workarounds for a specific CVE ID.
+
+### 4. `get_quota_status`
+Queries your account's daily package quota, today's scanned packages count, remaining quota, and rate limits in real-time.
 
 ---
 

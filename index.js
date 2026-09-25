@@ -15,7 +15,7 @@ async function callSecpanelApi(endpoint, method = 'GET', body = null) {
   const headers = {
     'Authorization': `Bearer ${SECPANEL_API_KEY}`,
     'Content-Type': 'application/json',
-    'User-Agent': 'Hosteva-SecPanel-MCP/1.0'
+    'User-Agent': 'Hosteva-SecPanel-MCP/1.1'
   };
 
   const options = {
@@ -44,47 +44,305 @@ async function callSecpanelApi(endpoint, method = 'GET', body = null) {
   return data;
 }
 
-function parseDependenciesFromDir(projectDir = process.cwd()) {
-  const packages = [];
+function cleanVersion(v) {
+  if (!v || typeof v !== 'string') return '*';
+  return v.replace(/^[v^~>=<]+/, '').trim();
+}
 
-  const packageJsonPath = path.join(projectDir, 'package.json');
-  if (fs.existsSync(packageJsonPath)) {
+function parseNpmLock(lockContent, pkgJsonContent = null, includeTransitive = false) {
+  const packages = [];
+  const directDeps = new Set();
+
+  if (pkgJsonContent) {
     try {
-      const pkg = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+      const pkg = typeof pkgJsonContent === 'string' ? JSON.parse(pkgJsonContent) : pkgJsonContent;
+      const allDeps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
+      Object.keys(allDeps).forEach(name => directDeps.add(name));
+    } catch (_) {}
+  }
+
+  try {
+    const lock = typeof lockContent === 'string' ? JSON.parse(lockContent) : lockContent;
+
+    if (lock.packages && typeof lock.packages === 'object') {
+      const rootPkg = lock.packages[''];
+      if (rootPkg && directDeps.size === 0) {
+        const rootDeps = { ...(rootPkg.dependencies || {}), ...(rootPkg.devDependencies || {}) };
+        Object.keys(rootDeps).forEach(name => directDeps.add(name));
+      }
+
+      for (const [key, pkgData] of Object.entries(lock.packages)) {
+        if (!key || key === '') continue;
+        if (!key.startsWith('node_modules/')) continue;
+
+        const subPath = key.replace(/^node_modules\//, '');
+        const isNested = subPath.includes('/node_modules/');
+        const pkgName = isNested ? subPath.split('/node_modules/').pop() : subPath;
+
+        if (!includeTransitive && directDeps.size > 0 && !directDeps.has(pkgName)) {
+          continue;
+        }
+
+        if (pkgData && pkgData.version) {
+          packages.push({
+            name: pkgName,
+            version: cleanVersion(pkgData.version),
+            ecosystem: 'npm'
+          });
+        }
+      }
+    } else if (lock.dependencies && typeof lock.dependencies === 'object') {
+      for (const [name, depData] of Object.entries(lock.dependencies)) {
+        if (!includeTransitive && directDeps.size > 0 && !directDeps.has(name)) {
+          continue;
+        }
+        if (depData && depData.version) {
+          packages.push({
+            name,
+            version: cleanVersion(depData.version),
+            ecosystem: 'npm'
+          });
+        }
+      }
+    }
+  } catch (_) {}
+
+  return packages;
+}
+
+function parseComposerLock(lockContent, composerJsonContent = null, includeTransitive = false) {
+  const packages = [];
+  const directDeps = new Set();
+
+  if (composerJsonContent) {
+    try {
+      const comp = typeof composerJsonContent === 'string' ? JSON.parse(composerJsonContent) : composerJsonContent;
+      const allDeps = { ...(comp.require || {}), ...(comp['require-dev'] || {}) };
+      Object.keys(allDeps).forEach(name => {
+        if (name !== 'php' && !name.startsWith('ext-')) directDeps.add(name);
+      });
+    } catch (_) {}
+  }
+
+  try {
+    const lock = typeof lockContent === 'string' ? JSON.parse(lockContent) : lockContent;
+    const allPkgs = [...(lock.packages || []), ...(lock['packages-dev'] || [])];
+
+    for (const item of allPkgs) {
+      if (!item.name || !item.version) continue;
+      if (item.name === 'php' || item.name.startsWith('ext-')) continue;
+
+      if (!includeTransitive && directDeps.size > 0 && !directDeps.has(item.name)) {
+        continue;
+      }
+
+      packages.push({
+        name: item.name,
+        version: cleanVersion(item.version),
+        ecosystem: 'composer'
+      });
+    }
+  } catch (_) {}
+
+  return packages;
+}
+
+function parseYarnLock(yarnContent, pkgJsonContent = null) {
+  const packages = [];
+  const directDeps = new Set();
+
+  if (pkgJsonContent) {
+    try {
+      const pkg = typeof pkgJsonContent === 'string' ? JSON.parse(pkgJsonContent) : pkgJsonContent;
+      const allDeps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
+      Object.keys(allDeps).forEach(name => directDeps.add(name));
+    } catch (_) {}
+  }
+
+  const seen = new Set();
+  const regex = /^"?((?:@[^@\s\r\n]+\/)?[^@\s\r\n]+)@[^:\r\n]+:\r?\n\s+version:?\s+"?([^"\r\n]+)"?/gm;
+  let match;
+  while ((match = regex.exec(yarnContent)) !== null) {
+    const name = match[1];
+    const version = cleanVersion(match[2]);
+    if (directDeps.size > 0 && !directDeps.has(name)) continue;
+    if (!seen.has(name)) {
+      seen.add(name);
+      packages.push({ name, version, ecosystem: 'npm' });
+    }
+  }
+
+  return packages;
+}
+
+function parsePnpmLock(pnpmContent, pkgJsonContent = null) {
+  const packages = [];
+  const directDeps = new Set();
+
+  if (pkgJsonContent) {
+    try {
+      const pkg = typeof pkgJsonContent === 'string' ? JSON.parse(pkgJsonContent) : pkgJsonContent;
+      const allDeps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
+      Object.keys(allDeps).forEach(name => directDeps.add(name));
+    } catch (_) {}
+  }
+
+  const seen = new Set();
+  const regex = /['"]?\/((?:@[^@\s\r\n\/]+\/)?[^@\s\r\n\/]+)@([0-9\.\-a-zA-Z]+)['"]?:/g;
+  let match;
+  while ((match = regex.exec(pnpmContent)) !== null) {
+    const name = match[1];
+    const version = cleanVersion(match[2]);
+    if (directDeps.size > 0 && !directDeps.has(name)) continue;
+    if (!seen.has(name)) {
+      seen.add(name);
+      packages.push({ name, version, ecosystem: 'npm' });
+    }
+  }
+
+  return packages;
+}
+
+function parsePoetryLock(content) {
+  const packages = [];
+  const regex = /\[\[package\]\][\s\S]*?name\s*=\s*"([^"]+)"[\s\S]*?version\s*=\s*"([^"]+)"/g;
+  let match;
+  while ((match = regex.exec(content)) !== null) {
+    packages.push({
+      name: match[1],
+      version: cleanVersion(match[2]),
+      ecosystem: 'pypi'
+    });
+  }
+  return packages;
+}
+
+function parsePipfileLock(content) {
+  const packages = [];
+  try {
+    const data = typeof content === 'string' ? JSON.parse(content) : content;
+    const all = { ...(data.default || {}), ...(data.develop || {}) };
+    for (const [name, obj] of Object.entries(all)) {
+      const ver = obj && obj.version ? cleanVersion(obj.version) : '*';
+      packages.push({ name, version: ver, ecosystem: 'pypi' });
+    }
+  } catch (_) {}
+  return packages;
+}
+
+function parseRequirementsTxt(content) {
+  const packages = [];
+  const lines = content.split('\n');
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const match = trimmed.match(/^([a-zA-Z0-9_\-\.]+)(?:==|>=|<=|~=)?([0-9\.]+)?/);
+    if (match) {
+      packages.push({ name: match[1], version: match[2] || '*', ecosystem: 'pypi' });
+    }
+  }
+  return packages;
+}
+
+function parseRawContent(rawContent, fileType = '') {
+  if (!rawContent || typeof rawContent !== 'string') return [];
+  const type = (fileType || '').toLowerCase();
+
+  if (type.includes('package-lock') || rawContent.includes('"lockfileVersion"')) {
+    return parseNpmLock(rawContent, null, false);
+  }
+  if (type.includes('composer.lock') || (rawContent.includes('"packages"') && rawContent.includes('"packages-dev"'))) {
+    return parseComposerLock(rawContent, null, false);
+  }
+  if (type.includes('pipfile.lock') || (rawContent.includes('"_meta"') && rawContent.includes('"default"'))) {
+    return parsePipfileLock(rawContent);
+  }
+  if (type.includes('poetry.lock') || rawContent.includes('[[package]]')) {
+    return parsePoetryLock(rawContent);
+  }
+  if (type.includes('yarn.lock') || rawContent.includes('yarn lockfile v1')) {
+    return parseYarnLock(rawContent);
+  }
+
+  try {
+    const parsed = JSON.parse(rawContent);
+    if (Array.isArray(parsed)) {
+      return parsed.filter(p => p && p.name).map(p => ({
+        name: String(p.name).trim(),
+        version: cleanVersion(p.version || '*'),
+        ecosystem: p.ecosystem || 'npm'
+      }));
+    }
+    if (parsed.dependencies || parsed.devDependencies) {
+      const all = { ...(parsed.dependencies || {}), ...(parsed.devDependencies || {}) };
+      return Object.entries(all).map(([name, ver]) => ({
+        name,
+        version: cleanVersion(ver),
+        ecosystem: 'npm'
+      }));
+    }
+  } catch (_) {}
+
+  return parseRequirementsTxt(rawContent);
+}
+
+function parseDependenciesFromDir(projectDir = process.cwd(), options = {}) {
+  const packages = [];
+  const includeTransitive = Boolean(options.includeTransitive);
+
+  const pkgJsonPath = path.join(projectDir, 'package.json');
+  const pkgLockPath = path.join(projectDir, 'package-lock.json');
+  const yarnLockPath = path.join(projectDir, 'yarn.lock');
+  const pnpmLockPath = path.join(projectDir, 'pnpm-lock.yaml');
+  const pkgJsonContent = fs.existsSync(pkgJsonPath) ? fs.readFileSync(pkgJsonPath, 'utf8') : null;
+
+  if (fs.existsSync(pkgLockPath)) {
+    const lockContent = fs.readFileSync(pkgLockPath, 'utf8');
+    packages.push(...parseNpmLock(lockContent, pkgJsonContent, includeTransitive));
+  } else if (fs.existsSync(yarnLockPath)) {
+    const yarnContent = fs.readFileSync(yarnLockPath, 'utf8');
+    packages.push(...parseYarnLock(yarnContent, pkgJsonContent));
+  } else if (fs.existsSync(pnpmLockPath)) {
+    const pnpmContent = fs.readFileSync(pnpmLockPath, 'utf8');
+    packages.push(...parsePnpmLock(pnpmContent, pkgJsonContent));
+  } else if (pkgJsonContent) {
+    try {
+      const pkg = JSON.parse(pkgJsonContent);
       const allDeps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
       for (const [name, rawVer] of Object.entries(allDeps)) {
-        const cleanVer = String(rawVer).replace(/^[\^~>=<]+/, '').trim();
-        packages.push({ name, version: cleanVer, ecosystem: 'npm' });
+        packages.push({ name, version: cleanVersion(rawVer), ecosystem: 'npm' });
       }
     } catch (_) {}
   }
 
   const composerJsonPath = path.join(projectDir, 'composer.json');
-  if (fs.existsSync(composerJsonPath)) {
+  const composerLockPath = path.join(projectDir, 'composer.lock');
+  const compJsonContent = fs.existsSync(composerJsonPath) ? fs.readFileSync(composerJsonPath, 'utf8') : null;
+
+  if (fs.existsSync(composerLockPath)) {
+    const lockContent = fs.readFileSync(composerLockPath, 'utf8');
+    packages.push(...parseComposerLock(lockContent, compJsonContent, includeTransitive));
+  } else if (compJsonContent) {
     try {
-      const comp = JSON.parse(fs.readFileSync(composerJsonPath, 'utf8'));
+      const comp = JSON.parse(compJsonContent);
       const allDeps = { ...(comp.require || {}), ...(comp['require-dev'] || {}) };
       for (const [name, rawVer] of Object.entries(allDeps)) {
         if (name === 'php' || name.startsWith('ext-')) continue;
-        const cleanVer = String(rawVer).replace(/^[\^~>=<]+/, '').trim();
-        packages.push({ name, version: cleanVer, ecosystem: 'composer' });
+        packages.push({ name, version: cleanVersion(rawVer), ecosystem: 'composer' });
       }
     } catch (_) {}
   }
 
+  const poetryLockPath = path.join(projectDir, 'poetry.lock');
+  const pipfileLockPath = path.join(projectDir, 'Pipfile.lock');
   const reqTxtPath = path.join(projectDir, 'requirements.txt');
-  if (fs.existsSync(reqTxtPath)) {
-    try {
-      const lines = fs.readFileSync(reqTxtPath, 'utf8').split('\n');
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith('#')) continue;
-        const match = trimmed.match(/^([a-zA-Z0-9_\-\.]+)(?:==|>=|<=|~=)?([0-9\.]+)?/);
-        if (match) {
-          packages.push({ name: match[1], version: match[2] || '*', ecosystem: 'pypi' });
-        }
-      }
-    } catch (_) {}
+
+  if (fs.existsSync(poetryLockPath)) {
+    packages.push(...parsePoetryLock(fs.readFileSync(poetryLockPath, 'utf8')));
+  } else if (fs.existsSync(pipfileLockPath)) {
+    packages.push(...parsePipfileLock(fs.readFileSync(pipfileLockPath, 'utf8')));
+  } else if (fs.existsSync(reqTxtPath)) {
+    packages.push(...parseRequirementsTxt(fs.readFileSync(reqTxtPath, 'utf8')));
   }
 
   return packages;
@@ -93,20 +351,53 @@ function parseDependenciesFromDir(projectDir = process.cwd()) {
 const TOOLS = [
   {
     name: 'scan_dependencies',
-    description: 'Proje dizinindeki (package.json, composer.json, requirements.txt) kütüphaneleri otomatik tarar ve Hosteva SecPanel üzerinden CVE, risk skoru ve Türkçe AI çözüm rehberi çıkarır.',
+    description: 'Projedeki bağımlılıkları (package-lock.json, composer.lock, yarn.lock, pnpm-lock.yaml, Pipfile.lock, poetry.lock veya manifestler) otomatik tarar ya da AI modelinin doğrudan ilettiği harici paket listesini/kilit metnini tarayarak Hosteva SecPanel üzerinden CVE, risk skoru, EPSS ve Türkçe AI çözüm rehberi çıkarır. Canlı kota ve kalan limit durumunu bildirir.',
     inputSchema: {
       type: 'object',
       properties: {
         project_dir: {
           type: 'string',
           description: 'Taranacak proje kök dizini (Boş bırakılırsa çalışma dizini kullanılır).'
+        },
+        packages: {
+          type: 'array',
+          description: 'Doğrudan taranacak harici kütüphane listesi. Modelin hafızasında veya harici ortamda (docker, pip freeze, dpkg vb.) tutulan sürümler doğrudan iletilebilir. Örn: [{"name": "axios", "version": "1.19.0", "ecosystem": "npm"}]',
+          items: {
+            type: 'object',
+            properties: {
+              name: { type: 'string', description: 'Paket adı' },
+              version: { type: 'string', description: 'Paket sürümü' },
+              ecosystem: { type: 'string', description: 'Ekosistem (npm, composer, pypi vb.)' }
+            },
+            required: ['name', 'version']
+          }
+        },
+        raw_content: {
+          type: 'string',
+          description: 'Harici bir ortamdan (SSH, container, clipboard vb.) alınan ham lock veya manifest içeriği (package-lock.json, composer.lock, requirements.txt vb.).'
+        },
+        file_type: {
+          type: 'string',
+          description: 'raw_content formatı ("package-lock.json", "composer.lock", "requirements.txt", "yarn.lock" vb.).'
+        },
+        lock_file_path: {
+          type: 'string',
+          description: 'Doğrudan okunacak özel bir kilit veya bağımlılık dosyasının tam dosya yolu.'
+        },
+        project_name: {
+          type: 'string',
+          description: 'Güvenlik raporu için özel proje başlığı (İsteğe bağlı).'
+        },
+        include_transitive: {
+          type: 'boolean',
+          description: 'Lock dosyasındaki dolaylı/alt bağımlılıkları da analize dahil et (Varsayılan: false).'
         }
       }
     }
   },
   {
     name: 'check_package',
-    description: 'Tek bir kütüphane için anlık zafiyet ve CVE sorgusu yapar.',
+    description: 'Tek bir kütüphane için anlık zafiyet ve CVE sorgusu yapar, kalan kullanım kotasını döner.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -130,7 +421,7 @@ const TOOLS = [
   },
   {
     name: 'get_quota_status',
-    description: 'Hosteva SecPanel hesabınızın günlük paket tarama kotasını ve kullanım durumunu sorgular.',
+    description: 'Hosteva SecPanel hesabınızın günlük paket tarama kotasını, bugün taranan paket sayısını, kalan kotayı ve dakikalık hız limitini sorgular.',
     inputSchema: {
       type: 'object',
       properties: {}
@@ -140,30 +431,77 @@ const TOOLS = [
 
 async function handleToolCall(name, args) {
   if (name === 'scan_dependencies') {
-    const targetDir = args?.project_dir || process.cwd();
-    const pkgs = parseDependenciesFromDir(targetDir);
+    const rawPackages = [];
 
-    if (pkgs.length === 0) {
+    if (Array.isArray(args?.packages) && args.packages.length > 0) {
+      for (const p of args.packages) {
+        if (p && p.name && p.version) {
+          rawPackages.push({
+            name: String(p.name).trim(),
+            version: cleanVersion(p.version),
+            ecosystem: p.ecosystem || 'npm'
+          });
+        }
+      }
+    }
+
+    if (args?.raw_content) {
+      const parsed = parseRawContent(args.raw_content, args.file_type);
+      rawPackages.push(...parsed);
+    }
+
+    if (args?.lock_file_path && fs.existsSync(args.lock_file_path)) {
+      try {
+        const content = fs.readFileSync(args.lock_file_path, 'utf8');
+        const parsed = parseRawContent(content, path.basename(args.lock_file_path));
+        rawPackages.push(...parsed);
+      } catch (_) {}
+    }
+
+    const targetDir = args?.project_dir || (rawPackages.length === 0 ? process.cwd() : null);
+    if (targetDir && fs.existsSync(targetDir)) {
+      const dirPkgs = parseDependenciesFromDir(targetDir, { includeTransitive: Boolean(args?.include_transitive) });
+      rawPackages.push(...dirPkgs);
+    }
+
+    const seen = new Set();
+    const uniquePkgs = [];
+    for (const p of rawPackages) {
+      const key = `${p.ecosystem || 'npm'}:${p.name}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        uniquePkgs.push(p);
+      }
+    }
+
+    if (uniquePkgs.length === 0) {
       return {
         content: [
           {
             type: 'text',
-            text: `Belirtilen dizinde (${targetDir}) taranabilir bağımlılık dosyası (package.json, composer.json, requirements.txt) bulunamadı.`
+            text: `Taranabilir bağımlılık bulunamadı. Lütfen "packages" parametresiyle doğrudan paket listesi sağlayın, "raw_content" ile lock/manifest içeriği iletin veya dizinde "package-lock.json", "composer.lock", "requirements.txt", "Pipfile.lock", "poetry.lock" vb. kilit dosyaları bulunduğundan emin olun.`
           }
         ]
       };
     }
 
+    const cappedPkgs = uniquePkgs.slice(0, 500);
+    const projectName = args?.project_name || (targetDir ? path.basename(targetDir) : 'Harici-Paket-Listesi');
+
     const response = await callSecpanelApi('/api/v1/mcp/scan', 'POST', {
-      project_name: path.basename(targetDir),
-      packages: pkgs
+      project_name: projectName,
+      packages: cappedPkgs
     });
+
+    const quotaInfo = response.quota
+      ? `\n\n📊 [Hosteva SecPanel Kota Durumu]:\n- Günlük Toplam Kota: ${response.quota.daily_package_quota} paket\n- Bugün Kullanılan: ${response.quota.packages_scanned_today} paket\n- KALAN GÜNLÜK KOTA: ${response.quota.remaining_quota} paket\n- Dakikalık İstek Limiti: ${response.quota.rate_limit_per_min}/dk`
+      : '';
 
     return {
       content: [
         {
           type: 'text',
-          text: JSON.stringify(response, null, 2)
+          text: `${JSON.stringify(response, null, 2)}${quotaInfo}`
         }
       ]
     };
@@ -172,15 +510,19 @@ async function handleToolCall(name, args) {
   if (name === 'check_package') {
     const response = await callSecpanelApi('/api/v1/mcp/check-package', 'POST', {
       name: args.name,
-      version: args.version,
+      version: cleanVersion(args.version),
       ecosystem: args.ecosystem || 'npm'
     });
+
+    const quotaInfo = response.quota
+      ? `\n\n📊 [Hosteva SecPanel Kota]: Kalan Günlük Kota: ${response.quota.remaining_quota}/${response.quota.daily_package_quota} paket`
+      : '';
 
     return {
       content: [
         {
           type: 'text',
-          text: JSON.stringify(response, null, 2)
+          text: `${JSON.stringify(response, null, 2)}${quotaInfo}`
         }
       ]
     };
@@ -199,12 +541,25 @@ async function handleToolCall(name, args) {
   }
 
   if (name === 'get_quota_status') {
-    const response = await callSecpanelApi('/api/v1/mcp/verify', 'GET');
+    const response = await callSecpanelApi('/api/v1/mcp/quota', 'GET');
+    const q = response.quota || {};
+    const t = response.tenant || {};
+    const u = response.usage_today || {};
+
+    const humanSummary = `Hosteva SecPanel Kota & Kullanım Durumu:
+- Hesap: ${t.company_name || '-'} (${t.plan || 'Standard'} Plan)
+- Günlük Paket Tarama Kotası: ${q.daily_package_quota || 0} paket
+- Bugün Taranan Paket Sayısı: ${q.packages_scanned_today || 0} paket
+- KALAN GÜNLÜK KOTA: ${q.remaining_quota || 0} paket (${q.usage_percent || '0%'} kullanıldı)
+- Dakikalık İstek Hız Limiti: ${q.rate_limit_per_min || 60} istek/dk
+- Kota Sıfırlanma: Her gün ${q.resets_at || '00:00 UTC'}
+- Bugün Tespit Edilen Zafiyet: ${u.vulns_detected || 0} (${u.critical_vulns || 0} kritik)`;
+
     return {
       content: [
         {
           type: 'text',
-          text: JSON.stringify(response, null, 2)
+          text: `${humanSummary}\n\n${JSON.stringify(response, null, 2)}`
         }
       ]
     };
@@ -242,7 +597,7 @@ rl.on('line', async (line) => {
         },
         serverInfo: {
           name: 'hosteva-secpanel-mcp',
-          version: '1.0.0'
+          version: '1.1.0'
         }
       }
     };
