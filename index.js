@@ -8,7 +8,7 @@ const SECPANEL_API_KEY = process.env.SECPANEL_API_KEY || '';
 
 async function callSecpanelApi(endpoint, method = 'GET', body = null) {
   if (!SECPANEL_API_KEY) {
-    throw new Error('SECPANEL_API_KEY ortam değişkeni tanımlanmamış. Lütfen geçerli bir Hosteva SecPanel API anahtarı sağlayın.');
+    throw new Error('SECPANEL_API_KEY ortam değişkeni tanımlanmamış. API anahtarı almak için lütfen https://www.hosteva.com adresinden kaydolup anahtarınızı oluşturun.');
   }
 
   const url = `${SECPANEL_URL}${endpoint}`;

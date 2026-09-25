@@ -58,6 +58,16 @@ Add the following configuration to your IDE's MCP config:
 
 ---
 
+## 🔑 How to Get an API Key
+
+To use Hosteva SecPanel MCP in your IDE, an API key is required:
+1. Visit **[https://www.hosteva.com](https://www.hosteva.com)** and sign up for an account.
+2. Activate your **Hosteva SecPanel AI Security Copilot** service in your client area.
+3. Generate your live API key (e.g. `sec_live_...`).
+4. Replace `YOUR_API_KEY_HERE` with your API key in your IDE's MCP config.
+
+---
+
 ## 🛠️ Available MCP Tools
 
 1. **`scan_dependencies`**: Scans `package.json`, `composer.json`, or `requirements.txt` in your project workspace. Automatically cross-references CVEs, scores risks, and tracks remediation progress.
@@ -73,4 +83,4 @@ Your source code **never leaves your local machine**. The MCP client extracts on
 
 ## 📄 License
 
-MIT © [Hosteva Cloud & Security](https://hosteva.com)
+MIT © [Hosteva Cloud & Security](https://www.hosteva.com)
