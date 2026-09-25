@@ -1,0 +1,20 @@
+{
+  "name": "@hosteva/secpanel-mcp",
+  "version": "1.0.0",
+  "description": "Hosteva SecPanel Official Model Context Protocol (MCP) Security Server",
+  "main": "index.js",
+  "bin": {
+    "hosteva-secpanel-mcp": "./index.js"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "security",
+    "cve",
+    "vulnerabilities",
+    "ai-agent",
+    "hosteva"
+  ],
+  "author": "Hosteva Security Team",
+  "license": "MIT"
+}
