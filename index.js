@@ -34,7 +34,10 @@ async function callSecpanelApi(endpoint, method = 'GET', body = null) {
   try {
     data = JSON.parse(text);
   } catch (_) {
-    throw new Error(`SecPanel API geçersiz yanıt döndü (${response.status}): ${text.substring(0, 200)}`);
+    if (response.status === 504 || response.status === 502) {
+      throw new Error(`SecPanel API ağ geçidi zaman aşımına uğradı (${response.status}). Sunucu yoğun olabilir veya taranan paket sayısı çok fazladır.`);
+    }
+    throw new Error(`SecPanel API geçersiz yanıt döndü (${response.status}): ${text.substring(0, 150)}`);
   }
 
   if (!response.ok) {
@@ -230,15 +233,37 @@ function parsePipfileLock(content) {
   return packages;
 }
 
+const ALLOWED_LOCK_FILES = [
+  'package-lock.json',
+  'package.json',
+  'composer.lock',
+  'composer.json',
+  'yarn.lock',
+  'pnpm-lock.yaml',
+  'pipfile.lock',
+  'pipfile',
+  'poetry.lock',
+  'pyproject.toml'
+];
+
+function isAllowedLockFile(filePath) {
+  if (!filePath || typeof filePath !== 'string') return false;
+  const base = path.basename(filePath).toLowerCase();
+  if (ALLOWED_LOCK_FILES.includes(base)) return true;
+  if (/^requirements([a-zA-Z0-9_\-]*)\.txt$/.test(base)) return true;
+  return false;
+}
+
 function parseRequirementsTxt(content) {
   const packages = [];
   const lines = content.split('\n');
   for (const line of lines) {
     const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) continue;
-    const match = trimmed.match(/^([a-zA-Z0-9_\-\.]+)(?:==|>=|<=|~=)?([0-9\.]+)?/);
+    if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('-') || trimmed.includes(':')) continue;
+    if (trimmed.includes('=') && !/(?:==|>=|<=|~=|!=)/.test(trimmed)) continue;
+    const match = trimmed.match(/^([a-zA-Z0-9][a-zA-Z0-9_\-\.]*)\s*(?:(==|>=|<=|~=|!=|<|>)\s*([0-9a-zA-Z_\.\-]+))?$/);
     if (match) {
-      packages.push({ name: match[1], version: match[2] || '*', ecosystem: 'pypi' });
+      packages.push({ name: match[1], version: match[3] || '*', ecosystem: 'pypi' });
     }
   }
   return packages;
@@ -263,6 +288,9 @@ function parseRawContent(rawContent, fileType = '') {
   if (type.includes('yarn.lock') || rawContent.includes('yarn lockfile v1')) {
     return parseYarnLock(rawContent);
   }
+  if (type.includes('requirements') || type.endsWith('.txt')) {
+    return parseRequirementsTxt(rawContent);
+  }
 
   try {
     const parsed = JSON.parse(rawContent);
@@ -283,7 +311,7 @@ function parseRawContent(rawContent, fileType = '') {
     }
   } catch (_) {}
 
-  return parseRequirementsTxt(rawContent);
+  return [];
 }
 
 function parseDependenciesFromDir(projectDir = process.cwd(), options = {}) {
@@ -450,12 +478,20 @@ async function handleToolCall(name, args) {
       rawPackages.push(...parsed);
     }
 
-    if (args?.lock_file_path && fs.existsSync(args.lock_file_path)) {
+    if (args?.lock_file_path) {
+      if (!isAllowedLockFile(args.lock_file_path)) {
+        throw new Error(`Güvenlik Kısıtlaması: '${path.basename(args.lock_file_path)}' izin verilen bir kilit veya bildirim dosyası değildir. Yalnızca bilinen bağımlılık dosyaları taranabilir.`);
+      }
+      if (!fs.existsSync(args.lock_file_path)) {
+        throw new Error(`Belirtilen kilit dosyası bulunamadı: ${args.lock_file_path}`);
+      }
       try {
         const content = fs.readFileSync(args.lock_file_path, 'utf8');
         const parsed = parseRawContent(content, path.basename(args.lock_file_path));
         rawPackages.push(...parsed);
-      } catch (_) {}
+      } catch (err) {
+        if (err.message && err.message.startsWith('Güvenlik')) throw err;
+      }
     }
 
     const targetDir = args?.project_dir || (rawPackages.length === 0 ? process.cwd() : null);
@@ -467,7 +503,7 @@ async function handleToolCall(name, args) {
     const seen = new Set();
     const uniquePkgs = [];
     for (const p of rawPackages) {
-      const key = `${p.ecosystem || 'npm'}:${p.name}`;
+      const key = `${p.ecosystem || 'npm'}:${p.name}@${p.version || '*'}`;
       if (!seen.has(key)) {
         seen.add(key);
         uniquePkgs.push(p);
@@ -488,20 +524,56 @@ async function handleToolCall(name, args) {
     const cappedPkgs = uniquePkgs.slice(0, 500);
     const projectName = args?.project_name || (targetDir ? path.basename(targetDir) : 'Harici-Paket-Listesi');
 
-    const response = await callSecpanelApi('/api/v1/mcp/scan', 'POST', {
-      project_name: projectName,
-      packages: cappedPkgs
-    });
+    const CHUNK_SIZE = 25;
+    const allResults = [];
+    let totalScanned = 0;
+    let totalVulns = 0;
+    let criticalCount = 0;
+    let highCount = 0;
+    let lastQuota = null;
 
-    const quotaInfo = response.quota
-      ? `\n\n📊 [Hosteva SecPanel Kota Durumu]:\n- Günlük Toplam Kota: ${response.quota.daily_package_quota} paket\n- Bugün Kullanılan: ${response.quota.packages_scanned_today} paket\n- KALAN GÜNLÜK KOTA: ${response.quota.remaining_quota} paket\n- Dakikalık İstek Limiti: ${response.quota.rate_limit_per_min}/dk`
+    for (let i = 0; i < cappedPkgs.length; i += CHUNK_SIZE) {
+      const chunk = cappedPkgs.slice(i, i + CHUNK_SIZE);
+      const response = await callSecpanelApi('/api/v1/mcp/scan', 'POST', {
+        project_name: projectName,
+        packages: chunk
+      });
+
+      if (response.results && Array.isArray(response.results)) {
+        allResults.push(...response.results);
+      }
+      totalScanned += (response.summary?.scanned_packages || chunk.length);
+      totalVulns += (response.summary?.total_vulnerabilities || 0);
+      criticalCount += (response.summary?.critical_vulnerabilities || 0);
+      highCount += (response.summary?.high_vulnerabilities || 0);
+      if (response.quota) {
+        lastQuota = response.quota;
+      }
+    }
+
+    const aggregatedResponse = {
+      success: true,
+      project_name: projectName,
+      summary: {
+        scanned_packages: totalScanned,
+        vulnerable_packages: allResults.filter(r => r.vulnerable).length,
+        total_vulnerabilities: totalVulns,
+        critical_vulnerabilities: criticalCount,
+        high_vulnerabilities: highCount
+      },
+      results: allResults,
+      quota: lastQuota
+    };
+
+    const quotaInfo = lastQuota
+      ? `\n\n📊 [Hosteva SecPanel Kota Durumu]:\n- Günlük Toplam Kota: ${lastQuota.daily_package_quota} paket\n- Bugün Kullanılan: ${lastQuota.packages_scanned_today} paket\n- KALAN GÜNLÜK KOTA: ${lastQuota.remaining_quota} paket\n- Dakikalık İstek Limiti: ${lastQuota.rate_limit_per_min}/dk`
       : '';
 
     return {
       content: [
         {
           type: 'text',
-          text: `${JSON.stringify(response, null, 2)}${quotaInfo}`
+          text: `${JSON.stringify(aggregatedResponse, null, 2)}${quotaInfo}`
         }
       ]
     };
