@@ -113,3 +113,4 @@ Your source code **never leaves your local machine**. The MCP client extracts on
 ## 📄 License
 
 MIT © [Hosteva Cloud & Security](https://www.hosteva.com)
+
