@@ -482,8 +482,8 @@ async function handleToolCall(name, args) {
       if (!isAllowedLockFile(args.lock_file_path)) {
         throw new Error(`Güvenlik Kısıtlaması: '${path.basename(args.lock_file_path)}' izin verilen bir kilit veya bildirim dosyası değildir. Yalnızca bilinen bağımlılık dosyaları taranabilir.`);
       }
-      if (!fs.existsSync(args.lock_file_path)) {
-        throw new Error(`Belirtilen kilit dosyası bulunamadı: ${args.lock_file_path}`);
+      if (!fs.existsSync(args.lock_file_path) || !fs.statSync(args.lock_file_path).isFile()) {
+        throw new Error(`Belirtilen kilit dosyası geçerli bir dosya değil veya bulunamadı: ${args.lock_file_path}`);
       }
       try {
         const content = fs.readFileSync(args.lock_file_path, 'utf8');
@@ -524,7 +524,7 @@ async function handleToolCall(name, args) {
     const cappedPkgs = uniquePkgs.slice(0, 500);
     const projectName = args?.project_name || (targetDir ? path.basename(targetDir) : 'Harici-Paket-Listesi');
 
-    const CHUNK_SIZE = 25;
+    const CHUNK_SIZE = 100;
     const allResults = [];
     let totalScanned = 0;
     let totalVulns = 0;
