@@ -524,7 +524,7 @@ async function handleToolCall(name, args) {
     const cappedPkgs = uniquePkgs.slice(0, 500);
     const projectName = args?.project_name || (targetDir ? path.basename(targetDir) : 'Harici-Paket-Listesi');
 
-    const CHUNK_SIZE = 100;
+    const CHUNK_SIZE = 15;
     const allResults = [];
     let totalScanned = 0;
     let totalVulns = 0;

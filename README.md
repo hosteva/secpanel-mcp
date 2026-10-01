@@ -97,7 +97,9 @@ Queries your account's daily package quota, today's scanned packages count, rema
 
 ---
 
-## 🆕 What's New in v1.1.1
+## 🆕 What's New in v1.1.2
+
+- **Batch Chunk Size Optimization:** Client-side 15-package micro-batching is strictly enforced for all dependency scans to permanently eliminate 504 Gateway Timeouts under proxy/reverse-proxy timeouts.
 
 - **Security & Path Whitelisting:** Enforced a strict lockfile whitelist (`isAllowedLockFile`) to eliminate arbitrary local file reads. Unsafe plaintext fallbacks have been removed.
 - **High-Precision Vulnerability Matching:** Migrated from broad substring matching to canonical JSON package matching and strict Semver range evaluations. False-positive rate dropped to near zero.

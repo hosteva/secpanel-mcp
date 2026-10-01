@@ -1,6 +1,6 @@
 {
   "name": "@hosteva/secpanel-mcp",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Hosteva SecPanel Official Model Context Protocol (MCP) Security Server",
   "main": "index.js",
   "bin": {
